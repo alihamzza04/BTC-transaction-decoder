@@ -1,35 +1,14 @@
-use serde::Serialize;
 use std::io::Read;
+use sha2::{Digest, Sha256};
+use transacrion::{Amount, Input, Output, Transaction, Txid};
+mod transacrion;
 
-#[derive(Debug, Serialize)]
-struct Transaction {
-    version: u32,
-    inputs: Vec<Input>,
-    outputs: Vec<Output>,
-}
-
-#[derive(Debug, Serialize)]
-struct Input {
-    txid: String,
-    output_index: u32,
-    script_sig: String,
-    sequence: u32,
-}
-
-struct Amount(u64);
-
-impl Amount {
-    pub fn to_btc(&self) -> f64 {
-        self.0 as f64 / 100_000_000.0
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct Output {
-    amount: f64,
-    script_pubkey: String,
-}
-
+/// Reads a Bitcoin CompactSize (variable-length integer) from the byte stream
+/// CompactSize uses 1-9 bytes depending on the value:
+/// - 0-252: 1 byte
+/// - 253-65535: 3 bytes (prefix 253 + 2-byte value)
+/// - 65536-4294967295: 5 bytes (prefix 254 + 4-byte value)
+/// - >4294967295: 9 bytes (prefix 255 + 8-byte value)
 fn read_compact_size(transaction_bytes: &mut &[u8]) -> u64 {
     let mut compact_size = [0_u8; 1];
     transaction_bytes.read_exact(&mut compact_size).unwrap();
@@ -58,7 +37,7 @@ fn read_amount(transaction_bytes: &mut &[u8]) -> Amount {
     let mut buffer = [0; 8];
     transaction_bytes.read_exact(&mut buffer).unwrap();
 
-    Amount(u64::from_le_bytes(buffer))
+    Amount::from_sat(u64::from_le_bytes(buffer))
 }
 
 fn read_u32(transaction_bytes: &mut &[u8]) -> u32 {
@@ -68,13 +47,15 @@ fn read_u32(transaction_bytes: &mut &[u8]) -> u32 {
     u32::from_be_bytes(buffer)
 }
 
-fn read_txid(transaction_bytes: &mut &[u8]) -> String {
+fn read_txid(transaction_bytes: &mut &[u8]) -> Txid {
     let mut buffer = [0; 32];
     transaction_bytes.read_exact(&mut buffer).unwrap();
-    buffer.reverse();
-    hex::encode(buffer)
+    buffer.reverse(); // Reverse to get the correct txid representation
+    Txid::from_bytes(buffer)
 }
 
+/// Reads a variable-length script (unlocking or locking script) from the byte stream
+/// Scripts are prefixed with their length in CompactSize format
 fn read_script(transaction_bytes: &mut &[u8]) -> String {
     let script_size = read_compact_size(transaction_bytes) as usize;
     let mut buffer = vec![0_u8; script_size];
@@ -82,20 +63,37 @@ fn read_script(transaction_bytes: &mut &[u8]) -> String {
     hex::encode(buffer)
 }
 
+fn hash_raw_transaction(raw_transaction: &[u8])-> Txid{
+     let mut hasher = Sha256::new();
+     hasher.update(raw_transaction);
+     let hash1 = hasher.finalize();
+
+    let mut hasher = Sha256::new();
+    hasher.update(hash1);
+    let hash2 = hasher.finalize();
+
+    Txid::from_bytes(hash2.into())
+}
+
 fn main() {
+    // Sample Bitcoin transaction in hexadecimal format
     let transaction_hex = "010000000242d5c1d6f7308bbe95c0f6e1301dd73a8da77d2155b0773bc297ac47f9cd7380010000006a4730440220771361aae55e84496b9e7b06e0a53dd122a1425f85840af7a52b20fa329816070220221dd92132e82ef9c133cb1a106b64893892a11acf2cfa1adb7698dcdc02f01b0121030077be25dc482e7f4abad60115416881fe4ef98af33c924cd8b20ca4e57e8bd5feffffff75c87cc5f3150eefc1c04c0246e7e0b370e64b17d6226c44b333a6f4ca14b49c000000006b483045022100e0d85fece671d367c8d442a96230954cdda4b9cf95e9edc763616d05d93e944302202330d520408d909575c5f6976cc405b3042673b601f4f2140b2e4d447e671c47012103c43afccd37aae7107f5a43f5b7b223d034e7583b77c8cd1084d86895a7341abffeffffff02ebb10f00000000001976a9144ef88a0b04e3ad6d1888da4be260d6735e0d308488ac508c1e000000000017a91476c0c8f2fc403c5edaea365f6a284317b9cdf7258700000000";
+
+    // Decode hex to raw bytes
     let transaction_bytes = hex::decode(transaction_hex).unwrap();
     let mut bytes_slice = transaction_bytes.as_slice();
 
-    let version = read_u32(&mut bytes_slice);
-    let input_count = read_compact_size(&mut bytes_slice);
+    // Parse transaction structure
+    let version = read_u32(&mut bytes_slice); // 4-byte version number
+    let input_count = read_compact_size(&mut bytes_slice); // Variable-length input count
     let mut inputs = vec![];
 
+    // Read each input
     for _ in 0..input_count {
-        let txid = read_txid(&mut bytes_slice);
-        let output_index = read_u32(&mut bytes_slice);
-        let script_sig = read_script(&mut bytes_slice);
-        let sequence = read_u32(&mut bytes_slice);
+        let txid = read_txid(&mut bytes_slice); // 32-byte previous transaction ID
+        let output_index = read_u32(&mut bytes_slice); // 4-byte output index
+        let script_sig = read_script(&mut bytes_slice); // Variable-length unlocking script
+        let sequence = read_u32(&mut bytes_slice); // 4-byte sequence number
 
         inputs.push(Input {
             txid,
@@ -105,12 +103,13 @@ fn main() {
         });
     }
 
-    let output_count = read_compact_size(&mut bytes_slice);
+    let output_count = read_compact_size(&mut bytes_slice); // Variable-length output count
     let mut outputs = vec![];
 
+    // Read each output
     for _ in 0..output_count {
-        let amount = read_amount(&mut bytes_slice).to_btc();
-        let script_pubkey = read_script(&mut bytes_slice);
+        let amount = read_amount(&mut bytes_slice); // 8-byte amount in satoshis
+        let script_pubkey = read_script(&mut bytes_slice); // Variable-length locking script
 
         outputs.push(Output {
             amount,
@@ -118,10 +117,15 @@ fn main() {
         });
     }
 
+    let lock_time = read_u32(&mut bytes_slice);
+    let transaction_id = hash_raw_transaction(&transaction_bytes);
+
     let transaction = Transaction {
+        transaction_id,
         version,
         inputs,
         outputs,
+        lock_time,
     };
     println!(
         "Transaction: {}",
@@ -133,24 +137,30 @@ fn main() {
 mod test {
     use super::read_compact_size;
 
+    /// Test the CompactSize reader with various value ranges
     #[test]
     fn test_read_compact_size() {
+        // Test single-byte value (0-252)
         let mut bytes = [1_u8].as_slice();
         let count = read_compact_size(&mut bytes);
         assert_eq!(count, 1_u64);
 
+        // Test 3-byte value (253-65535)
         let mut bytes = [253_u8, 0, 1].as_slice();
         let count = read_compact_size(&mut bytes);
         assert_eq!(count, 256_u64);
 
+        // Test 5-byte value (65536-4294967295)
         let mut bytes = [254_u8, 0, 0, 0, 1].as_slice();
         let count = read_compact_size(&mut bytes);
         assert_eq!(count, 256_u64.pow(3));
 
+        // Test 9-byte value (>4294967295)
         let mut bytes = [255_u8, 0, 0, 0, 0, 0, 0, 0, 1].as_slice();
         let count = read_compact_size(&mut bytes);
         assert_eq!(count, 256_u64.pow(7));
 
+        // Test with real hex encoded value (fd0600 = 20000 in CompactSize)
         let hex = "fd0600";
         let decoded = hex::decode(hex).unwrap();
         let mut bytes = decoded.as_slice();
