@@ -11,13 +11,13 @@ pub struct Transaction {
 
 #[derive(Debug)]
 pub struct Txid([u8; 32]);
-impl Txid{
-    pub fn from_bytes(bytes: [u8; 32])->Txid{
+impl Txid {
+    pub fn from_bytes(bytes: [u8; 32]) -> Txid {
         Txid(bytes)
     }
 }
-impl Serialize for Txid{
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error>{
+impl Serialize for Txid {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut bytes = self.0;
         bytes.reverse();
         s.serialize_str(&hex::encode(bytes))
